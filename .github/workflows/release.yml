@@ -1,0 +1,53 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build release binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Rename binary with platform suffix
+        run: cp target/release/inv inv-linux-x86_64
+
+      - name: Publish rolling release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          # Remove existing 'latest' release and tag so we can replace it
+          gh release delete latest --yes 2>/dev/null || true
+          git push --delete origin latest 2>/dev/null || true
+
+          gh release create latest \
+            --title "Latest build (${SHORT_SHA})" \
+            --notes "$(printf 'Automated build from [%s](../../commit/%s) on %s\n\n**Linux x86_64** binary — single file, no runtime dependencies.' "$SHORT_SHA" "$(git rev-parse HEAD)" "$DATE")" \
+            --prerelease \
+            inv-linux-x86_64

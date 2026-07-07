@@ -8,6 +8,7 @@ mod worklog;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use clap::{Args, Parser, Subcommand};
 use dialoguer::{Confirm, Input, Select};
+use std::collections::HashMap;
 use std::process;
 
 use clients::{
@@ -22,7 +23,7 @@ use pdf::generate_pdf;
 use store::data_dir;
 use worklog::{
     add_entry, delete_entry, filter_entries, get_entry, get_entry_by_date_client, get_last_entry,
-    get_uninvoiced, mark_invoiced, update_entry,
+    get_uninvoiced, load_worklog, mark_invoiced, update_entry,
 };
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
@@ -172,6 +173,12 @@ enum LogCmd {
     Edit { log_id: String },
     /// Delete a work log entry
     Delete { log_id: String },
+    /// Calendar view of logged work
+    Cal {
+        /// Month to display (YYYY-MM), defaults to current month
+        #[arg(long, value_name = "YYYY-MM")]
+        month: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -230,6 +237,7 @@ fn main() {
             }
             Some(LogCmd::Edit { log_id }) => cmd_log_edit(&log_id),
             Some(LogCmd::Delete { log_id }) => cmd_log_delete(&log_id),
+            Some(LogCmd::Cal { month }) => cmd_log_cal(month.as_deref()),
         },
         Commands::Invoice { command } => match command {
             InvoiceCmd::Create { client, from, to } => {
@@ -768,6 +776,98 @@ fn cmd_log_delete(log_id: &str) {
         delete_entry(log_id);
         println!("{}", green(&format!("Entry {} deleted.", log_id)));
     }
+}
+
+fn cmd_log_cal(month_str: Option<&str>) {
+    let today = Local::now().date_naive();
+    let (year, month) = if let Some(s) = month_str {
+        let mut it = s.splitn(2, '-');
+        let y = it.next().and_then(|p| p.parse::<i32>().ok()).unwrap_or(today.year());
+        let m = it.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(today.month());
+        (y, m.clamp(1, 12))
+    } else {
+        (today.year(), today.month())
+    };
+
+    // day_map: "YYYY-MM-DD" -> (total_units, all_invoiced)
+    let mut day_map: HashMap<String, (f64, bool)> = HashMap::new();
+    for entry in &load_worklog() {
+        let e = day_map.entry(entry.date.clone()).or_insert((0.0, true));
+        e.0 += entry.units;
+        if entry.invoice_id.is_none() {
+            e.1 = false;
+        }
+    }
+
+    let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap_or(today);
+    let next_first = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }
+    .unwrap_or(today);
+    let days_in_month = (next_first - first).num_days() as u32;
+    let start_dow = first.weekday().num_days_from_monday() as usize; // Mon=0
+
+    const MONTHS: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ];
+    let title = format!("{} {}", MONTHS[(month as usize - 1).min(11)], year);
+    println!("\n{:^28}", title); // 7 cols × 4 chars = 28
+
+    // Day-of-week header
+    print!("\x1b[48;5;240m\x1b[38;5;255m\x1b[1m");
+    for lbl in &[" Mo ", " Tu ", " We ", " Th ", " Fr ", " Sa ", " Su "] {
+        print!("{}", lbl);
+    }
+    println!("\x1b[0m");
+
+    // Leading blank cells
+    let mut col = start_dow;
+    for _ in 0..col {
+        print!("    ");
+    }
+
+    for day in 1..=days_in_month {
+        let date = NaiveDate::from_ymd_opt(year, month, day).unwrap();
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let is_weekend = col >= 5;
+        let bold_on = if date == today { "\x1b[1m" } else { "" };
+
+        let cell = if let Some(&(units, all_inv)) = day_map.get(&date_str) {
+            let bg = match (all_inv, units >= 1.0) {
+                (false, true)  => "48;5;28",  // uninvoiced full day   — green
+                (false, false) => "48;5;22",  // uninvoiced partial    — dark green
+                (true,  true)  => "48;5;124", // invoiced full day     — red
+                (true,  false) => "48;5;88",  // invoiced partial      — dark red
+            };
+            format!("\x1b[{}m\x1b[38;5;255m{} {:2} \x1b[0m", bg, bold_on, day)
+        } else if is_weekend {
+            format!("\x1b[38;5;238m{} {:2} \x1b[0m", bold_on, day)
+        } else {
+            format!("\x1b[48;5;235m\x1b[38;5;242m{} {:2} \x1b[0m", bold_on, day)
+        };
+
+        print!("{}", cell);
+        col += 1;
+        if col == 7 {
+            println!();
+            col = 0;
+        }
+    }
+    if col > 0 {
+        println!();
+    }
+
+    println!();
+    println!(
+        "  \x1b[48;5;28m\x1b[38;5;255m  \x1b[0m uninvoiced  \
+         \x1b[48;5;22m\x1b[38;5;255m  \x1b[0m partial  \
+         \x1b[48;5;124m\x1b[38;5;255m  \x1b[0m invoiced  \
+         \x1b[48;5;88m\x1b[38;5;255m  \x1b[0m partial  \
+         \x1b[48;5;235m\x1b[38;5;242m  \x1b[0m not logged"
+    );
 }
 
 // ── invoice ───────────────────────────────────────────────────────────────────

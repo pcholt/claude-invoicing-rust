@@ -168,6 +168,9 @@ enum LogCmd {
         from: Option<String>,
         #[arg(long, value_name = "YYYY-MM-DD")]
         to: Option<String>,
+        /// Show entries from the last N days (default 30; ignored when --from or --to is set)
+        #[arg(long)]
+        days: Option<u32>,
     },
     /// Edit a work log entry
     Edit { log_id: String },
@@ -232,8 +235,8 @@ fn main() {
         },
         Commands::Log(args) => match args.command {
             None => cmd_log(args.date.as_deref(), args.week),
-            Some(LogCmd::List { client, uninvoiced, from, to }) => {
-                cmd_log_list(client.as_deref(), uninvoiced, from.as_deref(), to.as_deref())
+            Some(LogCmd::List { client, uninvoiced, from, to, days }) => {
+                cmd_log_list(client.as_deref(), uninvoiced, from.as_deref(), to.as_deref(), days)
             }
             Some(LogCmd::Edit { log_id }) => cmd_log_edit(&log_id),
             Some(LogCmd::Delete { log_id }) => cmd_log_delete(&log_id),
@@ -682,9 +685,19 @@ fn cmd_log_list(
     uninvoiced: bool,
     from_date: Option<&str>,
     to_date: Option<&str>,
+    days: Option<u32>,
 ) {
     require_config();
-    let entries = filter_entries(client_id, uninvoiced, from_date, to_date);
+    // When no explicit date range is given, default to the last N days (default 30)
+    let computed_from: Option<String> = if from_date.is_none() && to_date.is_none() {
+        let n = days.unwrap_or(30) as i64;
+        let cutoff = Local::now().date_naive() - Duration::days(n - 1);
+        Some(cutoff.format("%Y-%m-%d").to_string())
+    } else {
+        None
+    };
+    let effective_from = from_date.or(computed_from.as_deref());
+    let entries = filter_entries(client_id, uninvoiced, effective_from, to_date);
     if entries.is_empty() {
         println!("No entries found.");
         return;
